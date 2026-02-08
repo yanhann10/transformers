@@ -1686,4 +1686,216 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         return input_ids, model_kwargs
 
 
-__all__ = ["Qwen2VLForConditionalGeneration", "Qwen2VLModel", "Qwen2VLPreTrainedModel", "Qwen2VLTextModel"]
+####
+class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, GenerationMixin):
+    _checkpoint_conversion_mapping = {
+        "^visual": "model.visual",
+        r"^model(?!\.(language_model|visual))": "model.language_model",
+    }
+    _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.model = Qwen2VLModel(config)
+        self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
+        #### 
+        self.audio_projector = nn.Sequential(
+            nn.Linear(config.audio_config.encoder_hidden_size, config.text_config.hidden_size),
+            nn.GELU(),
+            nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size),
+        )
+        #### 
+        self.post_init()
+
+    def get_input_embeddings(self):
+        return self.model.get_input_embeddings()
+
+    def set_input_embeddings(self, value):
+        self.model.set_input_embeddings(value)
+
+    def get_image_features(self, pixel_values, image_grid_thw=None, **kwargs):
+        return self.model.get_image_features(pixel_values=pixel_values, image_grid_thw=image_grid_thw, **kwargs)
+
+    def get_video_features(self, pixel_values_videos, video_grid_thw=None, **kwargs):
+        return self.model.get_video_features(pixel_values_videos=pixel_values_videos, video_grid_thw=video_grid_thw, **kwargs)
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        labels: torch.LongTensor | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_values_videos: torch.FloatTensor | None = None,
+        image_grid_thw: torch.LongTensor | None = None,
+        video_grid_thw: torch.LongTensor | None = None,
+        audio_embeds: torch.FloatTensor | None = None,
+        rope_deltas: torch.LongTensor | None = None,
+        cache_position: torch.LongTensor | None = None,
+        logits_to_keep: int | torch.Tensor = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> tuple | Qwen2VLCausalLMOutputWithPast:
+        r"""
+        audio_embeds (`torch.FloatTensor` of shape `(total_audio_tokens, encoder_hidden_size)`, *optional*):
+            Pre-encoded audio embeddings from whisper encoder, to be projected and spliced in.
+        """
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+
+        if inputs_embeds is None:
+            inputs_embeds = self.model.get_input_embeddings()(input_ids)
+
+        if pixel_values is not None:
+            image_embs = self.model.get_image_features(pixel_values, image_grid_thw, return_dict=True).pooler_output
+            image_embs = torch.cat(image_embs, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            image_mask, _ = self.model.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, image_features=image_embs
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embs)
+
+        if pixel_values_videos is not None:
+            video_embs = self.model.get_video_features(pixel_values_videos, video_grid_thw, return_dict=True).pooler_output
+            video_embs = torch.cat(video_embs, dim=0).to(inputs_embeds.device, inputs_embeds.dtype)
+            _, video_mask = self.model.get_placeholder_mask(
+                input_ids, inputs_embeds=inputs_embeds, video_features=video_embs
+            )
+            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embs)
+
+        if audio_embeds is not None:
+            audio_embeds = torch.cat(audio_embeds, dim=0) if isinstance(audio_embeds, list) else audio_embeds
+            audio_embeds = audio_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+            projected = self.audio_projector(audio_embeds)
+            audio_token_id = getattr(self.config, "audio_pad_token_id", None)
+            if audio_token_id is not None and input_ids is not None:
+                audio_mask = (input_ids == audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
+                inputs_embeds = inputs_embeds.masked_scatter(audio_mask, projected)
+
+        if position_ids is None:
+            past_key_values_length = 0 if past_key_values is None else past_key_values.get_seq_length()
+            if self.model.rope_deltas is None or past_key_values_length == 0:
+                position_ids, rope_deltas = self.model.get_rope_index(
+                    input_ids, image_grid_thw, video_grid_thw, attention_mask
+                )
+                self.model.rope_deltas = rope_deltas
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
+                delta = (past_key_values_length + self.model.rope_deltas).to(inputs_embeds.device)
+                delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids + delta.to(position_ids.device)
+
+        outputs = self.model.language_model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(
+                logits=logits, labels=labels, vocab_size=self.config.text_config.vocab_size, **kwargs
+            )
+
+        return Qwen2VLCausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=getattr(self.model, "rope_deltas", None),
+        )
+
+    def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        pixel_values=None,
+        pixel_values_videos=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        audio_embeds=None,
+        is_first_iteration=False,
+        **kwargs,
+    ):
+        model_inputs = super().prepare_inputs_for_generation(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            cache_position=cache_position,
+            position_ids=position_ids,
+            pixel_values=pixel_values,
+            pixel_values_videos=pixel_values_videos,
+            image_grid_thw=image_grid_thw,
+            video_grid_thw=video_grid_thw,
+            audio_embeds=audio_embeds,
+            use_cache=use_cache,
+            is_first_iteration=is_first_iteration,
+            **kwargs,
+        )
+
+        if position_ids is None:
+            if model_inputs["cache_position"][0] == 0 or self.model.rope_deltas is None:
+                vision_positions, rope_deltas = self.model.get_rope_index(
+                    model_inputs.get("input_ids", None),
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    attention_mask=attention_mask,
+                )
+                self.model.rope_deltas = rope_deltas
+            elif "position_ids" in model_inputs:
+                batch_size, seq_length = model_inputs["position_ids"].shape
+                device = model_inputs["position_ids"].device
+                position_ids = torch.arange(seq_length, device=device)
+                position_ids = position_ids.view(1, 1, -1).expand(3, batch_size, -1)
+                delta = cache_position[0] + self.model.rope_deltas
+                delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                vision_positions = position_ids + delta.expand_as(position_ids)
+
+            text_positions = model_inputs["position_ids"][None, ...]
+            model_inputs["position_ids"] = torch.cat([text_positions, vision_positions], dim=0)
+
+        if not is_first_iteration and use_cache:
+            model_inputs["pixel_values"] = None
+            model_inputs["pixel_values_videos"] = None
+            model_inputs["audio_embeds"] = None
+
+        return model_inputs
+####
+
+
+__all__ = [
+    "Qwen2VLForConditionalGeneration",
+    "Qwen2VLForConditionalGenerationWithAudio",
+    "Qwen2VLModel",
+    "Qwen2VLPreTrainedModel",
+    "Qwen2VLTextModel",
+]
