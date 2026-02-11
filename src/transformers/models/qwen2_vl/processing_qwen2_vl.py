@@ -109,22 +109,20 @@ class Qwen2VLProcessor(ProcessorMixin):
 
         ####
         if audio is not None:
-            audio_lengths = []
+            # audio is a list of mel spectrograms, each (n_mels, seq_len)
+            # whisper encoder output is always encoder_seq_len tokens per clip
+            encoder_seq_len = self.config.audio_config.encoder_seq_len if hasattr(self, "config") else 1500
             index = 0
             for i in range(len(text)):
                 while self.audio_token in text[i]:
-                    # each audio clip is (1, seq_len, hidden_dim)
-                    audio_len = audio[index].shape[-2]
-                    audio_lengths.append(audio_len)
                     text[i] = text[i].replace(
                         self.audio_token,
-                        "<|placeholder|>" * audio_len,
+                        "<|placeholder|>" * encoder_seq_len,
                         1,
                     )
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.audio_token)
-            audio_inputs["audio_embeds"] = audio
-            audio_inputs["audio_lengths"] = audio_lengths
+            audio_inputs["audio_features"] = audio
         ####
 
         if images is not None:

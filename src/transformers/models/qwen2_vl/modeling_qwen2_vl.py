@@ -1698,13 +1698,24 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         super().__init__(config)
         self.model = Qwen2VLModel(config)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-        #### 
+        ####
+        from ..whisper.configuration_whisper import WhisperConfig
+        from ..whisper.modeling_whisper import WhisperEncoder
+
+        whisper_config = WhisperConfig(
+            d_model=config.audio_config.encoder_hidden_size,
+            num_mel_bins=config.audio_config.n_mels,
+            max_source_positions=config.audio_config.encoder_seq_len,
+        )
+        self.audio_encoder = WhisperEncoder(whisper_config)
+        self.audio_encoder._freeze_parameters()
+
         self.audio_projector = nn.Sequential(
             nn.Linear(config.audio_config.encoder_hidden_size, config.text_config.hidden_size),
             nn.GELU(),
             nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size),
         )
-        #### 
+        ####
         self.post_init()
 
     def get_input_embeddings(self):
@@ -1736,15 +1747,15 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         pixel_values_videos: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
-        audio_embeds: torch.FloatTensor | None = None,
+        audio_features: torch.FloatTensor | None = None,
         rope_deltas: torch.LongTensor | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | Qwen2VLCausalLMOutputWithPast:
         r"""
-        audio_embeds (`torch.FloatTensor` of shape `(total_audio_tokens, encoder_hidden_size)`, *optional*):
-            Pre-encoded audio embeddings from whisper encoder, to be projected and spliced in.
+        audio_features (`torch.FloatTensor` of shape `(batch_audio_clips, n_mels, seq_len)`, *optional*):
+            Mel spectrogram features to be encoded by the whisper encoder, projected, and spliced in.
         """
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -1771,11 +1782,14 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
             )
             inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embs)
 
-        if audio_embeds is not None:
-            audio_embeds = torch.cat(audio_embeds, dim=0) if isinstance(audio_embeds, list) else audio_embeds
-            audio_embeds = audio_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-            projected = self.audio_projector(audio_embeds)
-            audio_token_id = getattr(self.config, "audio_pad_token_id", None)
+        if audio_features is not None:
+            audio_features = audio_features.to(inputs_embeds.device, inputs_embeds.dtype)
+            with torch.no_grad():
+                encoder_out = self.audio_encoder(audio_features).last_hidden_state
+            projected = self.audio_projector(encoder_out)
+            # flatten (batch_clips, seq_len, hidden) -> (total_tokens, hidden)
+            projected = projected.reshape(-1, projected.shape[-1])
+            audio_token_id = self.config.audio_pad_token_id
             if audio_token_id is not None and input_ids is not None:
                 audio_mask = (input_ids == audio_token_id).unsqueeze(-1).expand_as(inputs_embeds)
                 inputs_embeds = inputs_embeds.masked_scatter(audio_mask, projected)
@@ -1841,7 +1855,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         pixel_values_videos=None,
         image_grid_thw=None,
         video_grid_thw=None,
-        audio_embeds=None,
+        audio_features=None,
         is_first_iteration=False,
         **kwargs,
     ):
@@ -1856,7 +1870,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
             pixel_values_videos=pixel_values_videos,
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
-            audio_embeds=audio_embeds,
+            audio_features=audio_features,
             use_cache=use_cache,
             is_first_iteration=is_first_iteration,
             **kwargs,
@@ -1886,7 +1900,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         if not is_first_iteration and use_cache:
             model_inputs["pixel_values"] = None
             model_inputs["pixel_values_videos"] = None
-            model_inputs["audio_embeds"] = None
+            model_inputs["audio_features"] = None
 
         return model_inputs
 ####
