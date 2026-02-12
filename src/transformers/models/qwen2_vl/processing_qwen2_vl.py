@@ -56,10 +56,10 @@ class Qwen2VLProcessor(ProcessorMixin):
             if getattr(tokenizer, "video_token_id", None)
             else tokenizer.convert_tokens_to_ids(self.video_token)
         )
-        ####
+        
         self.audio_token = "<|audio_pad|>"
         self.audio_token_id = tokenizer.convert_tokens_to_ids(self.audio_token)
-        ####
+        
         super().__init__(image_processor, tokenizer, video_processor, chat_template=chat_template)
 
     @auto_docstring
@@ -91,9 +91,9 @@ class Qwen2VLProcessor(ProcessorMixin):
         )
 
         image_inputs = videos_inputs = {}
-        ####
+        
         audio_inputs = {}
-        ####
+        
         if images is not None:
             image_inputs = self.image_processor(images=images, **output_kwargs["images_kwargs"])
             image_grid_thw = image_inputs["image_grid_thw"]
@@ -107,7 +107,7 @@ class Qwen2VLProcessor(ProcessorMixin):
 
         text = text.copy()
 
-        ####
+        
         if audio is not None:
             # audio is a list of mel spectrograms, each (n_mels, seq_len)
             # whisper encoder output is always encoder_seq_len tokens per clip
@@ -123,7 +123,7 @@ class Qwen2VLProcessor(ProcessorMixin):
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.audio_token)
             audio_inputs["audio_features"] = audio
-        ####
+        
 
         if images is not None:
             merge_length = self.image_processor.merge_size**2

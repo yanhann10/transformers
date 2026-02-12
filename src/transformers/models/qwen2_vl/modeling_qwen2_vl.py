@@ -1686,7 +1686,9 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         return input_ids, model_kwargs
 
 
-####
+import whisper
+whisper_model = whisper.load_model("turbo")
+
 class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, GenerationMixin):
     _checkpoint_conversion_mapping = {
         "^visual": "model.visual",
@@ -1698,24 +1700,20 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         super().__init__(config)
         self.model = Qwen2VLModel(config)
         self.lm_head = nn.Linear(config.text_config.hidden_size, config.text_config.vocab_size, bias=False)
-        ####
-        from ..whisper.configuration_whisper import WhisperConfig
-        from ..whisper.modeling_whisper import WhisperEncoder
+        
 
-        whisper_config = WhisperConfig(
-            d_model=config.audio_config.encoder_hidden_size,
-            num_mel_bins=config.audio_config.n_mels,
-            max_source_positions=config.audio_config.encoder_seq_len,
-        )
-        self.audio_encoder = WhisperEncoder(whisper_config)
-        self.audio_encoder._freeze_parameters()
+        self.audio_encoder = whisper_model.encoder
+        for p in self.audio_encoder.parameters():
+            p.requires_grad = False
+        self.audio_encoder.eval()
+        audio_hidden = whisper_model.dims.n_audio_state
 
         self.audio_projector = nn.Sequential(
-            nn.Linear(config.audio_config.encoder_hidden_size, config.text_config.hidden_size),
+            nn.Linear(audio_hidden, config.text_config.hidden_size),
             nn.GELU(),
             nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size),
         )
-        ####
+        
         self.post_init()
 
     def get_input_embeddings(self):
@@ -1785,7 +1783,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
         if audio_features is not None:
             audio_features = audio_features.to(inputs_embeds.device, inputs_embeds.dtype)
             with torch.no_grad():
-                encoder_out = self.audio_encoder(audio_features).last_hidden_state
+                encoder_out = self.audio_encoder(audio_features)
             projected = self.audio_projector(encoder_out)
             # flatten (batch_clips, seq_len, hidden) -> (total_tokens, hidden)
             projected = projected.reshape(-1, projected.shape[-1])
@@ -1903,7 +1901,7 @@ class Qwen2VLForConditionalGenerationWithAudio(Qwen2VLPreTrainedModel, Generatio
             model_inputs["audio_features"] = None
 
         return model_inputs
-####
+
 
 
 __all__ = [
