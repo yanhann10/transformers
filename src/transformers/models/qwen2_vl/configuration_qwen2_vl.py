@@ -22,6 +22,22 @@ from ...utils import logging
 
 logger = logging.get_logger(__name__)
 
+####
+class Qwen2VLAudioConfig(PreTrainedConfig):
+    model_type = "qwen2_vl_audio"
+    base_config_key = "audio_config"
+    def __init__(
+        self,
+        encoder_hidden_size=1280,   
+        encoder_seq_len=1500,       # whisper turbo output
+        n_mels=128,                 # whisper turbo mel bins
+        **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.encoder_hidden_size = encoder_hidden_size
+        self.encoder_seq_len = encoder_seq_len
+        self.n_mels = n_mels
+####
 
 class Qwen2VLVisionConfig(PreTrainedConfig):
     model_type = "qwen2_vl"
@@ -271,17 +287,23 @@ class Qwen2VLConfig(PreTrainedConfig):
     ```"""
 
     model_type = "qwen2_vl"
-    sub_configs = {"vision_config": Qwen2VLVisionConfig, "text_config": Qwen2VLTextConfig}
+    sub_configs = {"vision_config": Qwen2VLVisionConfig, "text_config": Qwen2VLTextConfig, "audio_config": Qwen2VLAudioConfig}
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
         text_config=None,
         vision_config=None,
+        audio_config=None,
         image_token_id=151655,
         video_token_id=151656,
         vision_start_token_id=151652,
         vision_end_token_id=151653,
+        ####
+        audio_start_token_id=151657,
+        audio_pad_token_id=151658,
+        audio_end_token_id=151659,
+        ####
         tie_word_embeddings=False,
         **kwargs,
     ):
@@ -289,7 +311,12 @@ class Qwen2VLConfig(PreTrainedConfig):
             self.vision_config = self.sub_configs["vision_config"](**vision_config)
         elif vision_config is None:
             self.vision_config = self.sub_configs["vision_config"]()
-
+        ####
+        if isinstance(audio_config, dict):
+            self.audio_config = self.sub_configs["audio_config"](**audio_config)
+        elif audio_config is None:
+            self.audio_config = self.sub_configs["audio_config"]()
+        ####
         if isinstance(text_config, dict):
             self.text_config = self.sub_configs["text_config"](**text_config)
         elif text_config is None:
@@ -304,6 +331,11 @@ class Qwen2VLConfig(PreTrainedConfig):
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
+        ####
+        self.audio_start_token_id = audio_start_token_id
+        self.audio_pad_token_id = audio_pad_token_id
+        self.audio_end_token_id = audio_end_token_id
+        ####
         self.tie_word_embeddings = tie_word_embeddings
         super().__init__(**kwargs)
 
